@@ -265,6 +265,92 @@ def eliminar_movimiento(mov_id):
     supabase.table("movimientos").delete().eq("id", mov_id).execute()
 
 
+def guardar_movimientos_lote(lista_movimientos):
+    """Inserta múltiples movimientos de una vez."""
+    supabase.table("movimientos").insert(lista_movimientos).execute()
+
+
+# ──────────────────────────────────────────────
+# 3B. AUTO-CATEGORIZACIÓN POR PALABRAS CLAVE
+# ──────────────────────────────────────────────
+
+REGLAS_CATEGORIA = [
+    # (palabras clave en descripción, subclasificacion que debe coincidir en BD)
+    # INGRESOS
+    (["cobranza", "cobro a cliente"], "Cobros a clientes"),
+    (["venta de contado", "venta contado", "venta efectivo"], "Ventas de contado"),
+    (["anticipo cliente", "adelanto cliente"], "Anticipos de clientes"),
+    (["nota de credito recibida", "nota credito"], "Notas de crédito recibidas"),
+    (["interes bancario", "intereses ganados"], "Intereses bancarios"),
+    (["ganancia cambiaria", "diferencial cambiario positivo"], "Ganancia cambiaria"),
+    (["dividendo"], "Dividendos recibidos"),
+    (["alquiler recibido", "ingreso alquiler", "canon arrendamiento"], "Ingresos por alquiler"),
+    (["recuperacion gasto", "reintegro"], "Recuperación de gastos"),
+    # EGRESOS - NÓMINA
+    (["nomina", "sueldo", "salario", "quincena"], "Sueldos y salarios"),
+    (["prestacion social", "antiguedad"], "Prestaciones sociales"),
+    (["utilidad", "bonificacion", "bono"], "Utilidades / Bonificaciones"),
+    (["ivss", "faov", "inces", "seguro social"], "IVSS / FAOV / INCES"),
+    (["vacacion"], "Vacaciones"),
+    (["cesta ticket", "alimentacion", "cestaticket"], "Alimentación / Cesta ticket"),
+    # EGRESOS - OPERATIVOS
+    (["alquiler local", "canon alquiler", "arrendamiento local"], "Alquiler de local"),
+    (["electricidad", "agua", "aseo", "servicio publico"], "Servicios públicos"),
+    (["internet", "telefono", "telecomunicacion", "cantv", "movistar", "digitel"], "Internet / Telecomunicaciones"),
+    (["seguro", "poliza"], "Seguros"),
+    (["mantenimiento", "reparacion"], "Mantenimiento"),
+    # EGRESOS - COMPRAS
+    (["compra mercancia", "compra inventario", "mercaderia"], "Compras de mercancía"),
+    (["materia prima"], "Compras de materia prima"),
+    (["flete", "transporte", "envio", "delivery"], "Fletes y transporte"),
+    (["pago proveedor", "proveedor"], "Pagos a proveedores"),
+    # EGRESOS - IMPUESTOS
+    (["islr", "impuesto renta"], "ISLR"),
+    (["iva por pagar", "iva debito", "iva declaracion"], "IVA por pagar"),
+    (["impuesto municipal", "patente industria"], "Impuestos municipales"),
+    (["tasa", "contribucion", "timbre fiscal"], "Tasas y contribuciones"),
+    (["retencion islr", "ret islr"], "Retenciones ISLR"),
+    (["retencion iva", "ret iva"], "Retenciones IVA"),
+    # EGRESOS - FINANCIEROS
+    (["comision bancaria", "comision banco", "comisiones bancarias", "igtf"], "Comisiones bancarias"),
+    (["interes prestamo", "intereses pagados"], "Intereses por préstamos"),
+    (["perdida cambiaria", "diferencial cambiario negativo"], "Pérdida cambiaria"),
+    (["itf", "igtf", "impuesto transaccion"], "ITF / IGTF"),
+    # EGRESOS - ADMINISTRATIVOS
+    (["papeleria", "utiles oficina"], "Papelería y útiles"),
+    (["honorario", "profesional", "consultoria", "asesoria"], "Honorarios profesionales"),
+    (["representacion", "viaje", "viatico"], "Gastos de representación"),
+    (["suscripcion", "software", "licencia"], "Suscripciones y software"),
+    (["gasto legal", "abogado", "notaria", "registro"], "Gastos legales"),
+    # INVERSIONES
+    (["compra equipo", "computador", "maquinaria"], "Compra de equipos"),
+    (["compra vehiculo", "vehiculo"], "Compra de vehículos"),
+    (["mejora local", "remodelacion", "ampliacion"], "Mejoras al local"),
+    (["prestamo otorgado", "prestamo dado"], "Préstamos otorgados"),
+    # FINANCIAMIENTO
+    (["prestamo recibido", "credito recibido"], "Préstamos recibidos"),
+    (["pago prestamo", "cuota prestamo", "amortizacion"], "Pago de préstamos"),
+    (["aporte capital", "capitalizacion"], "Aportes de capital"),
+    (["retiro capital", "dividendo pagado", "distribucion utilidades"], "Retiros de capital / Dividendos"),
+]
+
+
+def auto_categorizar(descripcion, categorias_bd):
+    """Intenta asignar categoría automáticamente según palabras clave en la descripción."""
+    if not descripcion or not categorias_bd:
+        return None, None
+    desc_lower = descripcion.lower().strip()
+
+    for palabras_clave, subclasif_objetivo in REGLAS_CATEGORIA:
+        for palabra in palabras_clave:
+            if palabra in desc_lower:
+                # Buscar la categoría en BD
+                for cat in categorias_bd:
+                    if cat["subclasificacion"] == subclasif_objetivo:
+                        return cat["id"], cat["partida_fc"]
+    return None, None
+
+
 # ──────────────────────────────────────────────
 # 4. ESTILOS PERSONALIZADOS
 # ──────────────────────────────────────────────
@@ -647,98 +733,407 @@ elif pagina == "📥 Movimientos":
         st.stop()
 
     nombres_bancos = {b["id"]: b["nombre"] for b in bancos}
+    nombres_bancos_inv = {b["nombre"].upper().strip(): b["id"] for b in bancos}
     lista_cats = {c["id"]: f"{c['subclasificacion']} → {c['partida_fc']}" for c in categorias} if categorias else {}
 
-    # Solo admin puede registrar movimientos
+    # Pestañas: Manual | Importar | Historial
     if es_admin:
-        st.subheader("Nuevo Movimiento")
-        with st.form("form_mov", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                m_fecha = st.date_input("Fecha", value=date.today())
-                m_banco = st.selectbox("Banco / Caja", list(nombres_bancos.keys()), format_func=lambda x: nombres_bancos[x])
-            with col2:
-                m_ref = st.text_input("Referencia")
-                m_desc = st.text_input("Descripción")
-            with col3:
-                m_monto = st.number_input("Monto", step=0.01, format="%.2f")
-                m_moneda = st.selectbox("Moneda", ["VES", "USD", "EUR"])
-            col4, col5 = st.columns(2)
-            with col4:
-                m_tipo = st.selectbox("Tipo", ["Ingreso", "Egreso"])
-            with col5:
-                cat_opciones = ["Sin categorizar"] + list(lista_cats.values())
-                m_cat_label = st.selectbox("Categoría (Subclasificación → Partida)", cat_opciones)
+        tab_manual, tab_importar, tab_historial = st.tabs(
+            ["✏️ Registro Manual", "📤 Importar Archivo", "📋 Historial"]
+        )
+    else:
+        tab_historial = st.container()
+        tab_manual = None
+        tab_importar = None
 
-            if st.form_submit_button("➕ Registrar Movimiento", use_container_width=True):
-                cat_id = None
-                partida = None
-                if m_cat_label != "Sin categorizar" and categorias:
-                    for c in categorias:
-                        label_c = f"{c['subclasificacion']} → {c['partida_fc']}"
-                        if label_c == m_cat_label:
-                            cat_id = c["id"]
-                            partida = c["partida_fc"]
-                            break
+    # ── PESTAÑA: REGISTRO MANUAL (solo admin) ──
+    if es_admin:
+        with tab_manual:
+            st.subheader("Nuevo Movimiento")
+            with st.form("form_mov", clear_on_submit=True):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    m_fecha = st.date_input("Fecha", value=date.today())
+                    m_banco = st.selectbox("Banco / Caja", list(nombres_bancos.keys()), format_func=lambda x: nombres_bancos[x])
+                with col2:
+                    m_ref = st.text_input("Referencia")
+                    m_desc = st.text_input("Descripción")
+                with col3:
+                    m_monto = st.number_input("Monto", step=0.01, format="%.2f")
+                    m_moneda = st.selectbox("Moneda", ["VES", "USD", "EUR"])
+                col4, col5 = st.columns(2)
+                with col4:
+                    m_tipo = st.selectbox("Tipo", ["Ingreso", "Egreso"])
+                with col5:
+                    cat_opciones = ["Sin categorizar"] + list(lista_cats.values())
+                    m_cat_label = st.selectbox("Categoría (Subclasificación → Partida)", cat_opciones)
 
-                monto_final = abs(m_monto) if m_tipo == "Ingreso" else -abs(m_monto)
+                if st.form_submit_button("➕ Registrar Movimiento", use_container_width=True):
+                    cat_id = None
+                    partida = None
+                    if m_cat_label != "Sin categorizar" and categorias:
+                        for c in categorias:
+                            label_c = f"{c['subclasificacion']} → {c['partida_fc']}"
+                            if label_c == m_cat_label:
+                                cat_id = c["id"]
+                                partida = c["partida_fc"]
+                                break
 
-                guardar_movimiento(
+                    monto_final = abs(m_monto) if m_tipo == "Ingreso" else -abs(m_monto)
+
+                    guardar_movimiento(
+                        {
+                            "empresa_id": empresa_id,
+                            "fecha": m_fecha.isoformat(),
+                            "banco_id": m_banco,
+                            "referencia": m_ref,
+                            "descripcion": m_desc,
+                            "monto": monto_final,
+                            "moneda": m_moneda,
+                            "tipo": m_tipo.lower(),
+                            "categoria_id": cat_id,
+                            "partida_fc": partida,
+                        }
+                    )
+                    st.success("Movimiento registrado.")
+                    st.rerun()
+
+    # ── PESTAÑA: IMPORTAR ARCHIVO (solo admin) ──
+    if es_admin:
+        with tab_importar:
+            st.subheader("📤 Importar Movimientos desde Archivo")
+
+            # Guía del formato requerido
+            with st.expander("📖 Formato requerido del archivo — Leer antes de importar", expanded=True):
+                st.markdown(
+                    """
+**El archivo debe tener estas columnas (exactamente con estos nombres):**
+
+| # | Columna | Obligatoria | Descripción | Ejemplo |
+|---|---------|-------------|-------------|---------|
+| 1 | `FECHA` | ✅ Sí | Fecha del movimiento (DD/MM/AAAA o AAAA-MM-DD) | `20/07/2026` |
+| 2 | `BANCO` | ✅ Sí | Nombre del banco/caja, debe coincidir con los registrados | `Mercantil` |
+| 3 | `REFERENCIA` | ❌ No | Número de referencia bancaria | `0014502001199` |
+| 4 | `DESCRIPCION` | ✅ Sí | Descripción del movimiento | `INGRESOS POR COBRANZAS` |
+| 5 | `MONTO` | ✅ Sí | Monto con signo: positivo = ingreso, negativo = egreso | `1028353.5` o `-56.18` |
+| 6 | `MONEDA` | ❌ No | Moneda (VES, USD, EUR). Si no existe, se asume VES | `Bs` o `USD` |
+
+**Formatos aceptados:** `.xlsx` (Excel) y `.csv` (texto separado por comas o punto y coma).
+
+**Sobre el MONTO:** los ingresos van en positivo y los egresos en negativo, tal como aparecen en tu estado de cuenta.
+
+**Sobre la MONEDA:** puedes escribir `Bs`, `VES`, `bolivares` para bolívares; `USD`, `$`, `dolares` para dólares; `EUR`, `€`, `euros` para euros. Si la columna no existe, se asume VES.
+
+**La categoría se asigna automáticamente** según la descripción (ej: "COBRANZA" → Ingresos por Ventas, "COMISIONES BANCARIAS" → Gastos Bancarios). Lo que no pueda clasificar queda como "Sin categorizar" para que lo ajustes después.
+                    """
+                )
+
+                # Botón para descargar plantilla de ejemplo
+                plantilla_csv = "FECHA,BANCO,REFERENCIA,DESCRIPCION,MONTO,MONEDA\n20/07/2026,Mercantil,0014502001198,INGRESOS POR COBRANZAS,1028353.50,Bs\n20/07/2026,Mercantil,0095402001198,COMISIONES BANCARIAS IGTF,-79235.13,Bs\n17/07/2026,BINANCE,0014502001197,INGRESOS POR COBRANZAS,7490.25,USD\n"
+                st.download_button(
+                    "⬇️ Descargar plantilla de ejemplo (.csv)",
+                    data=plantilla_csv,
+                    file_name="plantilla_movimientos.csv",
+                    mime="text/csv",
+                )
+
+            st.divider()
+
+            # Bancos registrados (referencia para el usuario)
+            st.caption("🏦 **Bancos registrados en esta empresa** (el nombre en tu archivo debe coincidir con alguno de estos):")
+            st.code(", ".join(sorted([b["nombre"] for b in bancos])))
+
+            # Upload del archivo
+            archivo = st.file_uploader(
+                "Selecciona tu archivo Excel o CSV",
+                type=["xlsx", "xls", "csv", "txt"],
+                help="Arrastra o selecciona el archivo con los movimientos a importar.",
+            )
+
+            if archivo is not None:
+                # Leer el archivo
+                try:
+                    if archivo.name.endswith((".csv", ".txt")):
+                        # Intentar detectar separador
+                        import io
+                        contenido = archivo.read().decode("utf-8", errors="replace")
+                        archivo.seek(0)
+                        if ";" in contenido[:500]:
+                            df_imp = pd.read_csv(io.StringIO(contenido), sep=";", dtype=str)
+                        else:
+                            df_imp = pd.read_csv(io.StringIO(contenido), sep=",", dtype=str)
+                    else:
+                        df_imp = pd.read_excel(archivo, dtype=str)
+                except Exception as e:
+                    st.error(f"Error al leer el archivo: {e}")
+                    st.stop()
+
+                # Normalizar nombres de columnas
+                df_imp.columns = (
+                    df_imp.columns.str.strip()
+                    .str.upper()
+                    .str.replace("Á", "A").str.replace("É", "E").str.replace("Í", "I")
+                    .str.replace("Ó", "O").str.replace("Ú", "U").str.replace("Ñ", "N")
+                )
+
+                # Mapear nombres alternativos de columnas
+                col_map = {}
+                for col in df_imp.columns:
+                    col_clean = col.strip()
+                    if col_clean in ("FECHA", "DATE"):
+                        col_map[col] = "FECHA"
+                    elif col_clean in ("BANCO", "BANCO / CAJA", "BANCO/CAJA", "BANCO_CAJA"):
+                        col_map[col] = "BANCO"
+                    elif col_clean in ("REFERENCIA", "REF", "NUMERO REFERENCIA", "NRO REFERENCIA"):
+                        col_map[col] = "REFERENCIA"
+                    elif col_clean in ("DESCRIPCION", "DESCRIPCION SEGUN BANCO", "CONCEPTO", "DETALLE"):
+                        col_map[col] = "DESCRIPCION"
+                    elif col_clean in ("MONTO", "MONTO (MONEDA DE LA CUENTA)", "IMPORTE", "AMOUNT", "VALOR"):
+                        col_map[col] = "MONTO"
+                    elif col_clean in ("MONEDA", "MONEDA CUENTA", "CURRENCY"):
+                        col_map[col] = "MONEDA"
+                df_imp = df_imp.rename(columns=col_map)
+
+                # Verificar columnas obligatorias
+                cols_requeridas = ["FECHA", "BANCO", "DESCRIPCION", "MONTO"]
+                cols_faltantes = [c for c in cols_requeridas if c not in df_imp.columns]
+
+                if cols_faltantes:
+                    st.error(
+                        f"❌ Faltan columnas obligatorias: **{', '.join(cols_faltantes)}**. "
+                        f"Tu archivo tiene: {', '.join(df_imp.columns.tolist())}. "
+                        f"Revisa la guía de formato arriba."
+                    )
+                    st.stop()
+
+                # Eliminar filas completamente vacías
+                df_imp = df_imp.dropna(how="all").reset_index(drop=True)
+
+                # Limpiar datos
+                df_imp["MONTO"] = (
+                    df_imp["MONTO"]
+                    .str.replace(",", ".", regex=False)
+                    .str.replace(" ", "", regex=False)
+                    .str.strip()
+                )
+                df_imp["MONTO"] = pd.to_numeric(df_imp["MONTO"], errors="coerce")
+
+                # Parsear fechas (soportar varios formatos)
+                def parsear_fecha(val):
+                    if pd.isna(val) or str(val).strip() == "":
+                        return None
+                    val = str(val).strip()
+                    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y", "%m/%d/%Y"):
+                        try:
+                            return datetime.strptime(val, fmt).date()
+                        except ValueError:
+                            continue
+                    try:
+                        return pd.to_datetime(val).date()
+                    except Exception:
+                        return None
+
+                df_imp["FECHA_PARSED"] = df_imp["FECHA"].apply(parsear_fecha)
+
+                # Normalizar moneda
+                def normalizar_moneda(val):
+                    if pd.isna(val) or str(val).strip() == "":
+                        return "VES"
+                    v = str(val).upper().strip()
+                    if v in ("BS", "VES", "BOLIVARES", "BOLIVAR", "BSF", "BSS"):
+                        return "VES"
+                    elif v in ("USD", "$", "DOLARES", "DOLAR"):
+                        return "USD"
+                    elif v in ("EUR", "€", "EUROS", "EURO"):
+                        return "EUR"
+                    return "VES"
+
+                if "MONEDA" in df_imp.columns:
+                    df_imp["MONEDA_NORM"] = df_imp["MONEDA"].apply(normalizar_moneda)
+                else:
+                    df_imp["MONEDA_NORM"] = "VES"
+
+                if "REFERENCIA" not in df_imp.columns:
+                    df_imp["REFERENCIA"] = ""
+
+                # Buscar banco_id para cada fila
+                def buscar_banco_id(nombre_banco):
+                    if pd.isna(nombre_banco):
+                        return None
+                    nb = str(nombre_banco).upper().strip()
+                    # Buscar coincidencia exacta
+                    if nb in nombres_bancos_inv:
+                        return nombres_bancos_inv[nb]
+                    # Buscar coincidencia parcial
+                    for key, bid in nombres_bancos_inv.items():
+                        if nb in key or key in nb:
+                            return bid
+                    return None
+
+                df_imp["BANCO_ID"] = df_imp["BANCO"].apply(buscar_banco_id)
+
+                # Auto-categorizar
+                def cat_row(desc):
+                    cid, pfc = auto_categorizar(desc, categorias)
+                    return pd.Series({"CAT_ID": cid, "PARTIDA_FC": pfc})
+
+                df_cats = df_imp["DESCRIPCION"].apply(cat_row)
+                df_imp["CAT_ID"] = df_cats["CAT_ID"]
+                df_imp["PARTIDA_FC"] = df_cats["PARTIDA_FC"]
+                df_imp["PARTIDA_FC"] = df_imp["PARTIDA_FC"].fillna("Sin categorizar")
+
+                # Determinar tipo
+                df_imp["TIPO"] = df_imp["MONTO"].apply(lambda x: "ingreso" if pd.notna(x) and x >= 0 else "egreso")
+
+                # ── Validación ──
+                errores = []
+                filas_invalidas = 0
+
+                fechas_nulas = df_imp["FECHA_PARSED"].isna().sum()
+                if fechas_nulas > 0:
+                    errores.append(f"⚠️ {fechas_nulas} fila(s) con fecha inválida o vacía — serán excluidas.")
+
+                montos_nulos = df_imp["MONTO"].isna().sum()
+                if montos_nulos > 0:
+                    errores.append(f"⚠️ {montos_nulos} fila(s) con monto inválido — serán excluidas.")
+
+                bancos_no_encontrados = df_imp["BANCO_ID"].isna().sum()
+                if bancos_no_encontrados > 0:
+                    bancos_desconocidos = df_imp[df_imp["BANCO_ID"].isna()]["BANCO"].unique()
+                    errores.append(
+                        f"⚠️ {bancos_no_encontrados} fila(s) con banco no reconocido: "
+                        f"**{', '.join(str(b) for b in bancos_desconocidos)}** — serán excluidas. "
+                        f"Verifica que los nombres coincidan con los bancos registrados."
+                    )
+
+                # Filas válidas
+                df_validas = df_imp[
+                    df_imp["FECHA_PARSED"].notna()
+                    & df_imp["MONTO"].notna()
+                    & df_imp["BANCO_ID"].notna()
+                ].copy()
+
+                filas_invalidas = len(df_imp) - len(df_validas)
+
+                # Mostrar errores si hay
+                for err in errores:
+                    st.warning(err)
+
+                # Resumen y vista previa
+                sin_cat_count = len(df_validas[df_validas["PARTIDA_FC"] == "Sin categorizar"])
+                cat_count = len(df_validas) - sin_cat_count
+
+                st.success(
+                    f"✅ **{len(df_validas)}** movimientos listos para importar "
+                    f"({cat_count} categorizados automáticamente, {sin_cat_count} sin categorizar)"
+                )
+                if filas_invalidas > 0:
+                    st.caption(f"⚠️ {filas_invalidas} filas excluidas por datos inválidos.")
+
+                # Vista previa
+                st.subheader("Vista previa de los movimientos a importar")
+                preview = df_validas[["FECHA", "BANCO", "REFERENCIA", "DESCRIPCION", "MONTO", "MONEDA_NORM", "TIPO", "PARTIDA_FC"]].copy()
+                preview.columns = ["Fecha", "Banco", "Referencia", "Descripción", "Monto", "Moneda", "Tipo", "Categoría Asignada"]
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+
+                # Resumen por categoría
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    st.caption("**Resumen por categoría:**")
+                    resumen_cat = df_validas.groupby("PARTIDA_FC")["MONTO"].agg(["sum", "count"]).reset_index()
+                    resumen_cat.columns = ["Partida FC", "Monto Total", "Movimientos"]
+                    resumen_cat = resumen_cat.sort_values("Monto Total")
+                    st.dataframe(resumen_cat, use_container_width=True, hide_index=True)
+                with col_r2:
+                    st.caption("**Resumen por banco:**")
+                    resumen_ban = df_validas.groupby("BANCO")["MONTO"].agg(["sum", "count"]).reset_index()
+                    resumen_ban.columns = ["Banco", "Monto Total", "Movimientos"]
+                    st.dataframe(resumen_ban, use_container_width=True, hide_index=True)
+
+                # Botón de importación
+                st.divider()
+                if len(df_validas) > 0:
+                    if st.button(
+                        f"✅ Confirmar importación de {len(df_validas)} movimientos",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        # Preparar datos para insertar
+                        registros = []
+                        for _, row in df_validas.iterrows():
+                            registros.append(
+                                {
+                                    "empresa_id": empresa_id,
+                                    "fecha": row["FECHA_PARSED"].isoformat(),
+                                    "banco_id": row["BANCO_ID"],
+                                    "referencia": str(row.get("REFERENCIA", "")).strip() if pd.notna(row.get("REFERENCIA")) else "",
+                                    "descripcion": str(row["DESCRIPCION"]).strip(),
+                                    "monto": float(row["MONTO"]),
+                                    "moneda": row["MONEDA_NORM"],
+                                    "tipo": row["TIPO"],
+                                    "categoria_id": row["CAT_ID"] if pd.notna(row["CAT_ID"]) else None,
+                                    "partida_fc": row["PARTIDA_FC"] if row["PARTIDA_FC"] != "Sin categorizar" else None,
+                                }
+                            )
+
+                        try:
+                            # Insertar en lotes de 50 para evitar timeouts
+                            total = len(registros)
+                            importados = 0
+                            for i in range(0, total, 50):
+                                lote = registros[i : i + 50]
+                                guardar_movimientos_lote(lote)
+                                importados += len(lote)
+
+                            st.success(f"🎉 ¡{importados} movimientos importados exitosamente!")
+                            st.balloons()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al importar: {e}")
+                else:
+                    st.warning("No hay movimientos válidos para importar. Revisa los errores arriba.")
+
+    # ── PESTAÑA: HISTORIAL DE MOVIMIENTOS ──
+    with (tab_historial if es_admin else tab_historial):
+        if not es_admin:
+            st.divider()
+        st.subheader("Movimientos registrados")
+        col_fa, col_fb = st.columns(2)
+        with col_fa:
+            f_anio = st.selectbox("Año", list(range(2026, 2020, -1)), key="f_anio_m")
+        with col_fb:
+            f_mes = st.selectbox(
+                "Mes",
+                list(range(1, 13)),
+                format_func=lambda m: calendar.month_name[m],
+                index=date.today().month - 1,
+                key="f_mes_m",
+            )
+
+        movs = cargar_movimientos(empresa_id, {"mes": f_mes, "anio": f_anio})
+        if movs:
+            filas = []
+            for m in movs:
+                banco_nombre = m.get("bancos", {}).get("nombre", "—") if m.get("bancos") else "—"
+                cat_info = m.get("categorias", {}) or {}
+                filas.append(
                     {
-                        "empresa_id": empresa_id,
-                        "fecha": m_fecha.isoformat(),
-                        "banco_id": m_banco,
-                        "referencia": m_ref,
-                        "descripcion": m_desc,
-                        "monto": monto_final,
-                        "moneda": m_moneda,
-                        "tipo": m_tipo.lower(),
-                        "categoria_id": cat_id,
-                        "partida_fc": partida,
+                        "Fecha": m["fecha"],
+                        "Banco": banco_nombre,
+                        "Ref": m.get("referencia", ""),
+                        "Descripción": m.get("descripcion", ""),
+                        "Monto": m["monto"],
+                        "Moneda": m.get("moneda", "VES"),
+                        "Tipo": m.get("tipo", ""),
+                        "Partida FC": m.get("partida_fc", "Sin categorizar"),
+                        "Subclasificación": cat_info.get("subclasificacion", "—"),
                     }
                 )
-                st.success("Movimiento registrado.")
-                st.rerun()
-
-    # Filtros y tabla de movimientos
-    st.divider()
-    st.subheader("Movimientos registrados")
-    col_fa, col_fb = st.columns(2)
-    with col_fa:
-        f_anio = st.selectbox("Año", list(range(2026, 2020, -1)), key="f_anio_m")
-    with col_fb:
-        f_mes = st.selectbox(
-            "Mes",
-            list(range(1, 13)),
-            format_func=lambda m: calendar.month_name[m],
-            index=date.today().month - 1,
-            key="f_mes_m",
-        )
-
-    movs = cargar_movimientos(empresa_id, {"mes": f_mes, "anio": f_anio})
-    if movs:
-        filas = []
-        for m in movs:
-            banco_nombre = m.get("bancos", {}).get("nombre", "—") if m.get("bancos") else "—"
-            cat_info = m.get("categorias", {}) or {}
-            filas.append(
-                {
-                    "Fecha": m["fecha"],
-                    "Banco": banco_nombre,
-                    "Ref": m.get("referencia", ""),
-                    "Descripción": m.get("descripcion", ""),
-                    "Monto": m["monto"],
-                    "Moneda": m.get("moneda", "VES"),
-                    "Tipo": m.get("tipo", ""),
-                    "Partida FC": m.get("partida_fc", "Sin categorizar"),
-                    "Subclasificación": cat_info.get("subclasificacion", "—"),
-                }
-            )
-        df_movs = pd.DataFrame(filas)
-        st.dataframe(df_movs, use_container_width=True, hide_index=True)
-        st.caption(f"Total: {len(filas)} movimientos")
-    else:
-        st.info("No hay movimientos para este período.")
+            df_movs = pd.DataFrame(filas)
+            st.dataframe(df_movs, use_container_width=True, hide_index=True)
+            st.caption(f"Total: {len(filas)} movimientos")
+        else:
+            st.info("No hay movimientos para este período.")
 
 
 # ──────────────────────────────────────────────
