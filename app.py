@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 import calendar
 import hashlib
 import json
+import io
 
 # ──────────────────────────────────────────────
 # 1. CONFIGURACIÓN Y CONEXIÓN A SUPABASE
@@ -828,13 +829,29 @@ elif pagina == "📥 Movimientos":
                     """
                 )
 
-                # Botón para descargar plantilla de ejemplo
-                plantilla_csv = "FECHA,BANCO,REFERENCIA,DESCRIPCION,MONTO,MONEDA\n20/07/2026,Mercantil,0014502001198,INGRESOS POR COBRANZAS,1028353.50,Bs\n20/07/2026,Mercantil,0095402001198,COMISIONES BANCARIAS IGTF,-79235.13,Bs\n17/07/2026,BINANCE,0014502001197,INGRESOS POR COBRANZAS,7490.25,USD\n"
+                # Botón para descargar plantilla de ejemplo (.xlsx)
+                df_plantilla = pd.DataFrame({
+                    "FECHA": ["20/07/2026", "20/07/2026", "17/07/2026"],
+                    "BANCO": ["Mercantil", "Mercantil", "BINANCE"],
+                    "REFERENCIA": ["0014502001198", "0095402001198", "0014502001197"],
+                    "DESCRIPCION": ["INGRESOS POR COBRANZAS", "COMISIONES BANCARIAS IGTF", "INGRESOS POR COBRANZAS"],
+                    "MONTO": [1028353.50, -79235.13, 7490.25],
+                    "MONEDA": ["Bs", "Bs", "USD"],
+                })
+                buffer_plantilla = io.BytesIO()
+                with pd.ExcelWriter(buffer_plantilla, engine="openpyxl") as writer:
+                    df_plantilla.to_excel(writer, index=False, sheet_name="Movimientos")
+                    # Ajustar ancho de columnas
+                    ws = writer.sheets["Movimientos"]
+                    anchos = {"A": 14, "B": 18, "C": 20, "D": 35, "E": 16, "F": 10}
+                    for col_letra, ancho in anchos.items():
+                        ws.column_dimensions[col_letra].width = ancho
+                buffer_plantilla.seek(0)
                 st.download_button(
-                    "⬇️ Descargar plantilla de ejemplo (.csv)",
-                    data=plantilla_csv,
-                    file_name="plantilla_movimientos.csv",
-                    mime="text/csv",
+                    "⬇️ Descargar plantilla de ejemplo (.xlsx)",
+                    data=buffer_plantilla,
+                    file_name="plantilla_movimientos.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
             st.divider()
