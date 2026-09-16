@@ -1,8 +1,9 @@
 """
-FLUJO DE CAJA & DASHBOARD — Aplicación Multi-Cliente
-=====================================================
+FLUJO DE CAJA & DASHBOARD — Aplicación Multi-Cliente con Login
+==============================================================
 Streamlit + Supabase (PostgreSQL)
 Autor: Darwin / contabilidadenlinea15@gmail.com
+v2.0 — Con autenticación por usuario y roles (admin/cliente)
 """
 
 import streamlit as st
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 from supabase import create_client
 from datetime import date, datetime, timedelta
 import calendar
+import hashlib
 import json
 
 # ──────────────────────────────────────────────
@@ -36,10 +38,135 @@ def init_supabase():
 
 supabase = init_supabase()
 
+
 # ──────────────────────────────────────────────
-# 2. FUNCIONES AUXILIARES DE BASE DE DATOS
+# 2. SISTEMA DE AUTENTICACIÓN
 # ──────────────────────────────────────────────
 
+def hash_password(password):
+    """Genera hash SHA-256 de la contraseña."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def verificar_login(usuario, password):
+    """Verifica credenciales y devuelve datos del usuario o None."""
+    pwd_hash = hash_password(password)
+    resp = (
+        supabase.table("usuarios")
+        .select("*, empresas(id, nombre)")
+        .eq("usuario", usuario)
+        .eq("password_hash", pwd_hash)
+        .eq("activo", True)
+        .execute()
+    )
+    if resp.data and len(resp.data) > 0:
+        return resp.data[0]
+    return None
+
+
+def crear_usuario(usuario, password, nombre_completo, rol, empresa_id=None):
+    """Crea un nuevo usuario."""
+    pwd_hash = hash_password(password)
+    data = {
+        "usuario": usuario,
+        "password_hash": pwd_hash,
+        "nombre_completo": nombre_completo,
+        "rol": rol,
+        "empresa_id": empresa_id,
+        "activo": True,
+    }
+    supabase.table("usuarios").insert(data).execute()
+
+
+def cargar_usuarios():
+    """Lista todos los usuarios."""
+    resp = (
+        supabase.table("usuarios")
+        .select("*, empresas(nombre)")
+        .order("nombre_completo")
+        .execute()
+    )
+    return resp.data
+
+
+def actualizar_usuario(user_id, data):
+    """Actualiza datos de un usuario."""
+    supabase.table("usuarios").update(data).eq("id", user_id).execute()
+
+
+def pantalla_login():
+    """Muestra la pantalla de login y retorna True si el usuario se autentica."""
+    st.markdown(
+        """
+        <div style="text-align:center; padding: 40px 0 20px 0;">
+            <h1 style="color: #1a1a2e;">💰 Flujo de Caja</h1>
+            <p style="color: #666; font-size: 1.1rem;">Dashboard Multi-Cliente</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_left, col_center, col_right = st.columns([1, 1.5, 1])
+    with col_center:
+        with st.form("login_form"):
+            st.subheader("Iniciar Sesión")
+            usuario = st.text_input("👤 Usuario", placeholder="Tu nombre de usuario")
+            password = st.text_input("🔒 Contraseña", type="password", placeholder="Tu contraseña")
+            submitted = st.form_submit_button("Entrar", use_container_width=True, type="primary")
+
+            if submitted:
+                if usuario and password:
+                    user_data = verificar_login(usuario, password)
+                    if user_data:
+                        st.session_state["authenticated"] = True
+                        st.session_state["user"] = user_data
+                        st.rerun()
+                    else:
+                        st.error("Usuario o contraseña incorrectos.")
+                else:
+                    st.warning("Ingresa usuario y contraseña.")
+
+        st.caption("Contacta al administrador si no tienes cuenta.")
+
+
+def obtener_empresas_usuario(user_data):
+    """Devuelve las empresas que el usuario puede ver según su rol."""
+    if user_data["rol"] == "admin":
+        return cargar_empresas()
+    else:
+        # Cliente solo ve su empresa asignada
+        if user_data.get("empresa_id"):
+            resp = (
+                supabase.table("empresas")
+                .select("*")
+                .eq("id", user_data["empresa_id"])
+                .execute()
+            )
+            return resp.data
+        return []
+
+
+# ──────────────────────────────────────────────
+# VERIFICAR AUTENTICACIÓN
+# ──────────────────────────────────────────────
+
+# Inicializar sesión
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+# Si no está autenticado, mostrar login
+if not st.session_state["authenticated"]:
+    pantalla_login()
+    st.stop()
+
+# Usuario autenticado — obtener datos
+user = st.session_state["user"]
+es_admin = user["rol"] == "admin"
+
+
+# ──────────────────────────────────────────────
+# 3. FUNCIONES AUXILIARES DE BASE DE DATOS
+# ──────────────────────────────────────────────
 
 def cargar_empresas():
     """Devuelve lista de empresas registradas."""
@@ -139,7 +266,7 @@ def eliminar_movimiento(mov_id):
 
 
 # ──────────────────────────────────────────────
-# 3. ESTILOS PERSONALIZADOS
+# 4. ESTILOS PERSONALIZADOS
 # ──────────────────────────────────────────────
 
 st.markdown(
@@ -175,7 +302,7 @@ def tarjeta_metrica(titulo, valor, clase="neutral"):
 
 
 # ──────────────────────────────────────────────
-# 4. SIDEBAR — SELECTOR DE EMPRESA + NAVEGACIÓN
+# 5. SIDEBAR — USUARIO, SELECTOR DE EMPRESA + NAVEGACIÓN
 # ──────────────────────────────────────────────
 
 with st.sidebar:
@@ -184,13 +311,31 @@ with st.sidebar:
     st.caption("Dashboard Multi-Cliente")
     st.divider()
 
-    empresas = cargar_empresas()
+    # Info del usuario logueado
+    st.markdown(f"👤 **{user['nombre_completo']}**")
+    rol_label = "🔑 Administrador" if es_admin else "👁️ Cliente"
+    st.caption(rol_label)
+
+    if st.button("🚪 Cerrar Sesión", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.session_state["user"] = None
+        st.rerun()
+
+    st.divider()
+
+    # Empresas según el rol
+    empresas = obtener_empresas_usuario(user)
     nombres_empresas = [e["nombre"] for e in empresas]
 
     if not nombres_empresas:
-        st.warning("No hay empresas registradas. Ve a **Configuración** para crear una.")
+        st.warning("No tienes empresas asignadas.")
         empresa_sel = None
         empresa_id = None
+    elif len(nombres_empresas) == 1:
+        # Cliente con una sola empresa — no mostrar selector
+        empresa_sel = nombres_empresas[0]
+        empresa_id = empresas[0]["id"]
+        st.info(f"🏢 **{empresa_sel}**")
     else:
         empresa_sel = st.selectbox(
             "🏢 Cliente / Empresa",
@@ -202,23 +347,131 @@ with st.sidebar:
         )
 
     st.divider()
-    pagina = st.radio(
-        "📂 Navegación",
-        [
-            "📊 Dashboard",
-            "📥 Movimientos",
-            "💱 Tasas de Cambio",
-            "🔍 Conciliación",
-            "⚙️ Configuración",
-        ],
-        label_visibility="collapsed",
-    )
+
+    # Navegación — admin ve todo, cliente ve solo lectura
+    if es_admin:
+        pagina = st.radio(
+            "📂 Navegación",
+            [
+                "📊 Dashboard",
+                "📥 Movimientos",
+                "💱 Tasas de Cambio",
+                "🔍 Conciliación",
+                "⚙️ Configuración",
+                "👥 Usuarios",
+            ],
+            label_visibility="collapsed",
+        )
+    else:
+        pagina = st.radio(
+            "📂 Navegación",
+            [
+                "📊 Dashboard",
+                "📥 Movimientos",
+                "💱 Tasas de Cambio",
+                "🔍 Conciliación",
+            ],
+            label_visibility="collapsed",
+        )
 
 # ──────────────────────────────────────────────
-# 5. PÁGINA: CONFIGURACIÓN (Empresas, Bancos, Categorías)
+# 6. PÁGINA: USUARIOS (solo admin)
 # ──────────────────────────────────────────────
 
-if pagina == "⚙️ Configuración":
+if pagina == "👥 Usuarios" and es_admin:
+    st.header("👥 Gestión de Usuarios")
+
+    tab_nuevo, tab_lista = st.tabs(["➕ Nuevo Usuario", "📋 Usuarios Registrados"])
+
+    with tab_nuevo:
+        st.subheader("Crear nuevo usuario")
+        todas_empresas = cargar_empresas()
+
+        with st.form("form_usuario", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                u_nombre = st.text_input("Nombre completo")
+                u_usuario = st.text_input("Nombre de usuario (para login)", help="Sin espacios, todo en minúsculas.")
+            with col2:
+                u_password = st.text_input("Contraseña", type="password")
+                u_rol = st.selectbox("Rol", ["cliente", "admin"], help="**Admin**: ve todas las empresas y puede crear usuarios. **Cliente**: solo ve su empresa asignada.")
+
+            if u_rol == "cliente" and todas_empresas:
+                u_empresa = st.selectbox(
+                    "Empresa asignada",
+                    [e["nombre"] for e in todas_empresas],
+                    help="El cliente solo podrá ver los datos de esta empresa.",
+                )
+            else:
+                u_empresa = None
+
+            if st.form_submit_button("➕ Crear Usuario", use_container_width=True):
+                if u_nombre and u_usuario and u_password:
+                    empresa_asig_id = None
+                    if u_rol == "cliente" and u_empresa and todas_empresas:
+                        empresa_asig_id = next(
+                            (e["id"] for e in todas_empresas if e["nombre"] == u_empresa), None
+                        )
+
+                    try:
+                        crear_usuario(u_usuario.lower().strip(), u_password, u_nombre, u_rol, empresa_asig_id)
+                        st.success(f"Usuario **{u_usuario}** creado como **{u_rol}**.")
+                        st.rerun()
+                    except Exception as e:
+                        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                            st.error("Ese nombre de usuario ya existe. Elige otro.")
+                        else:
+                            st.error(f"Error: {e}")
+                else:
+                    st.error("Todos los campos son obligatorios.")
+
+    with tab_lista:
+        st.subheader("Usuarios registrados")
+        usuarios = cargar_usuarios()
+        if usuarios:
+            filas_u = []
+            for u in usuarios:
+                emp_nombre = u.get("empresas", {})
+                if isinstance(emp_nombre, dict):
+                    emp_nombre = emp_nombre.get("nombre", "Todas (Admin)")
+                else:
+                    emp_nombre = "Todas (Admin)"
+                filas_u.append({
+                    "Nombre": u["nombre_completo"],
+                    "Usuario": u["usuario"],
+                    "Rol": u["rol"].upper(),
+                    "Empresa": emp_nombre,
+                    "Activo": "✅" if u.get("activo", True) else "❌",
+                })
+            st.dataframe(pd.DataFrame(filas_u), use_container_width=True, hide_index=True)
+
+            # Cambiar contraseña de usuario
+            st.divider()
+            st.subheader("Cambiar contraseña")
+            with st.form("form_cambiar_pwd"):
+                u_sel = st.selectbox("Usuario", [u["usuario"] for u in usuarios])
+                nueva_pwd = st.text_input("Nueva contraseña", type="password")
+                if st.form_submit_button("🔑 Cambiar Contraseña"):
+                    if nueva_pwd:
+                        uid = next((u["id"] for u in usuarios if u["usuario"] == u_sel), None)
+                        if uid:
+                            actualizar_usuario(uid, {"password_hash": hash_password(nueva_pwd)})
+                            st.success(f"Contraseña de **{u_sel}** actualizada.")
+                    else:
+                        st.error("Escribe la nueva contraseña.")
+        else:
+            st.info("No hay usuarios registrados.")
+
+
+# ──────────────────────────────────────────────
+# 7. PÁGINA: CONFIGURACIÓN (Empresas, Bancos, Categorías) — solo admin
+# ──────────────────────────────────────────────
+
+elif pagina == "⚙️ Configuración":
+    if not es_admin:
+        st.error("No tienes permisos para acceder a esta sección.")
+        st.stop()
+
     st.header("⚙️ Configuración del Sistema")
 
     tab_emp, tab_ban, tab_cat = st.tabs(
@@ -306,7 +559,7 @@ if pagina == "⚙️ Configuración":
 
 
 # ──────────────────────────────────────────────
-# 6. PÁGINA: TASAS DE CAMBIO
+# 8. PÁGINA: TASAS DE CAMBIO
 # ──────────────────────────────────────────────
 
 elif pagina == "💱 Tasas de Cambio":
@@ -330,21 +583,23 @@ elif pagina == "💱 Tasas de Cambio":
     with col_f3:
         st.write("")  # spacer
 
-    st.subheader("Registrar / Actualizar Tasa")
-    with st.form("form_tasa", clear_on_submit=False):
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            t_fecha = st.date_input("Fecha", value=date.today())
-        with col2:
-            t_bcv = st.number_input("Tasa BCV (Bs/$)", min_value=0.0, step=0.01, format="%.4f")
-        with col3:
-            t_euro = st.number_input("Tasa Euro (Bs/€)", min_value=0.0, step=0.01, format="%.4f")
-        with col4:
-            t_binance = st.number_input("Tasa Binance (Bs/$)", min_value=0.0, step=0.01, format="%.4f")
-        if st.form_submit_button("💾 Guardar Tasa", use_container_width=True):
-            guardar_tasa(empresa_id, t_fecha.isoformat(), t_bcv, t_euro, t_binance)
-            st.success(f"Tasa del {t_fecha} guardada.")
-            st.rerun()
+    # Solo admin puede registrar tasas
+    if es_admin:
+        st.subheader("Registrar / Actualizar Tasa")
+        with st.form("form_tasa", clear_on_submit=False):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                t_fecha = st.date_input("Fecha", value=date.today())
+            with col2:
+                t_bcv = st.number_input("Tasa BCV (Bs/$)", min_value=0.0, step=0.01, format="%.4f")
+            with col3:
+                t_euro = st.number_input("Tasa Euro (Bs/€)", min_value=0.0, step=0.01, format="%.4f")
+            with col4:
+                t_binance = st.number_input("Tasa Binance (Bs/$)", min_value=0.0, step=0.01, format="%.4f")
+            if st.form_submit_button("💾 Guardar Tasa", use_container_width=True):
+                guardar_tasa(empresa_id, t_fecha.isoformat(), t_bcv, t_euro, t_binance)
+                st.success(f"Tasa del {t_fecha} guardada.")
+                st.rerun()
 
     tasas = cargar_tasas(empresa_id, mes_tasa, anio_tasa)
     if tasas:
@@ -374,7 +629,7 @@ elif pagina == "💱 Tasas de Cambio":
 
 
 # ──────────────────────────────────────────────
-# 7. PÁGINA: MOVIMIENTOS
+# 9. PÁGINA: MOVIMIENTOS
 # ──────────────────────────────────────────────
 
 elif pagina == "📥 Movimientos":
@@ -394,54 +649,56 @@ elif pagina == "📥 Movimientos":
     nombres_bancos = {b["id"]: b["nombre"] for b in bancos}
     lista_cats = {c["id"]: f"{c['subclasificacion']} → {c['partida_fc']}" for c in categorias} if categorias else {}
 
-    st.subheader("Nuevo Movimiento")
-    with st.form("form_mov", clear_on_submit=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            m_fecha = st.date_input("Fecha", value=date.today())
-            m_banco = st.selectbox("Banco / Caja", list(nombres_bancos.keys()), format_func=lambda x: nombres_bancos[x])
-        with col2:
-            m_ref = st.text_input("Referencia")
-            m_desc = st.text_input("Descripción")
-        with col3:
-            m_monto = st.number_input("Monto", step=0.01, format="%.2f")
-            m_moneda = st.selectbox("Moneda", ["VES", "USD", "EUR"])
-        col4, col5 = st.columns(2)
-        with col4:
-            m_tipo = st.selectbox("Tipo", ["Ingreso", "Egreso"])
-        with col5:
-            cat_opciones = ["Sin categorizar"] + list(lista_cats.values())
-            m_cat_label = st.selectbox("Categoría (Subclasificación → Partida)", cat_opciones)
+    # Solo admin puede registrar movimientos
+    if es_admin:
+        st.subheader("Nuevo Movimiento")
+        with st.form("form_mov", clear_on_submit=True):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                m_fecha = st.date_input("Fecha", value=date.today())
+                m_banco = st.selectbox("Banco / Caja", list(nombres_bancos.keys()), format_func=lambda x: nombres_bancos[x])
+            with col2:
+                m_ref = st.text_input("Referencia")
+                m_desc = st.text_input("Descripción")
+            with col3:
+                m_monto = st.number_input("Monto", step=0.01, format="%.2f")
+                m_moneda = st.selectbox("Moneda", ["VES", "USD", "EUR"])
+            col4, col5 = st.columns(2)
+            with col4:
+                m_tipo = st.selectbox("Tipo", ["Ingreso", "Egreso"])
+            with col5:
+                cat_opciones = ["Sin categorizar"] + list(lista_cats.values())
+                m_cat_label = st.selectbox("Categoría (Subclasificación → Partida)", cat_opciones)
 
-        if st.form_submit_button("➕ Registrar Movimiento", use_container_width=True):
-            cat_id = None
-            partida = None
-            if m_cat_label != "Sin categorizar" and categorias:
-                for c in categorias:
-                    label_c = f"{c['subclasificacion']} → {c['partida_fc']}"
-                    if label_c == m_cat_label:
-                        cat_id = c["id"]
-                        partida = c["partida_fc"]
-                        break
+            if st.form_submit_button("➕ Registrar Movimiento", use_container_width=True):
+                cat_id = None
+                partida = None
+                if m_cat_label != "Sin categorizar" and categorias:
+                    for c in categorias:
+                        label_c = f"{c['subclasificacion']} → {c['partida_fc']}"
+                        if label_c == m_cat_label:
+                            cat_id = c["id"]
+                            partida = c["partida_fc"]
+                            break
 
-            monto_final = abs(m_monto) if m_tipo == "Ingreso" else -abs(m_monto)
+                monto_final = abs(m_monto) if m_tipo == "Ingreso" else -abs(m_monto)
 
-            guardar_movimiento(
-                {
-                    "empresa_id": empresa_id,
-                    "fecha": m_fecha.isoformat(),
-                    "banco_id": m_banco,
-                    "referencia": m_ref,
-                    "descripcion": m_desc,
-                    "monto": monto_final,
-                    "moneda": m_moneda,
-                    "tipo": m_tipo.lower(),
-                    "categoria_id": cat_id,
-                    "partida_fc": partida,
-                }
-            )
-            st.success("Movimiento registrado.")
-            st.rerun()
+                guardar_movimiento(
+                    {
+                        "empresa_id": empresa_id,
+                        "fecha": m_fecha.isoformat(),
+                        "banco_id": m_banco,
+                        "referencia": m_ref,
+                        "descripcion": m_desc,
+                        "monto": monto_final,
+                        "moneda": m_moneda,
+                        "tipo": m_tipo.lower(),
+                        "categoria_id": cat_id,
+                        "partida_fc": partida,
+                    }
+                )
+                st.success("Movimiento registrado.")
+                st.rerun()
 
     # Filtros y tabla de movimientos
     st.divider()
@@ -485,7 +742,7 @@ elif pagina == "📥 Movimientos":
 
 
 # ──────────────────────────────────────────────
-# 8. PÁGINA: DASHBOARD
+# 10. PÁGINA: DASHBOARD
 # ──────────────────────────────────────────────
 
 elif pagina == "📊 Dashboard":
@@ -658,7 +915,7 @@ elif pagina == "📊 Dashboard":
 
 
 # ──────────────────────────────────────────────
-# 9. PÁGINA: CONCILIACIÓN BANCARIA
+# 11. PÁGINA: CONCILIACIÓN BANCARIA
 # ──────────────────────────────────────────────
 
 elif pagina == "🔍 Conciliación":
@@ -787,7 +1044,7 @@ elif pagina == "🔍 Conciliación":
 
 
 # ──────────────────────────────────────────────
-# 10. FOOTER
+# 12. FOOTER
 # ──────────────────────────────────────────────
 st.divider()
-st.caption("Flujo de Caja Dashboard v1.0 — Desarrollado para @contabilidad_22")
+st.caption("Flujo de Caja Dashboard v2.0 — Desarrollado para @contabilidad_22")
